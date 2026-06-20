@@ -7,19 +7,39 @@ import sqlite3
 BASE_URL = "https://api.cartelsol.mosdon-dev.com"
 TOKEN_URL = "https://auth.cartelsol.mosdon-dev.com/oauth2/token"
 
-# Bearer Token hier einfuegen.
-BEARER_TOKEN = ""
-
 VEHICLES_ENDPOINT = "/vehicles"
 TRIPS_BY_VEHICLE_ENDPOINT = "/trips/vehicle/{vin}"
 
 
+def load_env_file(path=".env"):
+    if not os.path.exists(path):
+        return
+
+    with open(path, encoding="utf-8") as env_file:
+        for line in env_file:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+
+load_env_file()
+
+
 def get_headers():
-    if not BEARER_TOKEN:
-        raise ValueError("Bitte zuerst den Bearer Token in BEARER_TOKEN einfuegen.")
+    bearer_token = os.getenv("CARTELSOL_BEARER_TOKEN")
+
+    if not bearer_token:
+        raise ValueError(
+            "Bitte zuerst CARTELSOL_BEARER_TOKEN in der .env Datei eintragen."
+        )
 
     return {
-        "Authorization": f"Bearer {BEARER_TOKEN}",
+        "Authorization": f"Bearer {bearer_token}",
         "Accept": "application/json",
     }
 
