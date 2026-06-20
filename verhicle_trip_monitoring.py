@@ -9,6 +9,7 @@ TOKEN_URL = "https://auth.cartelsol.mosdon-dev.com/oauth2/token"
 
 VEHICLES_ENDPOINT = "/vehicles"
 TRIPS_BY_VEHICLE_ENDPOINT = "/trips/vehicle/{vin}"
+DEFAULT_DB_PATH = "trips.db"
 
 
 def load_env_file(path=".env"):
@@ -62,8 +63,7 @@ def get_vehicles():
     raise ValueError("Unerwartetes Format von /vehicles")
 
 
-def get_trip_data():
-    vehicles = get_vehicles()
+def get_trip_data(vehicles):
     vins = [vehicle["vin"] for vehicle in vehicles if "vin" in vehicle]
     vins = list(dict.fromkeys(vins))
 
@@ -93,6 +93,67 @@ def get_trip_data():
     return all_trips
 
 
+def save_to_sqlite(vehicles, trips):
+    db_path = os.getenv("SQLITE_DB_PATH", DEFAULT_DB_PATH)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS vehicles (
+        vin TEXT PRIMARY KEY,
+        raw_json TEXT NOT NULL
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS trips (
+        id TEXT PRIMARY KEY,
+        vin TEXT,
+        raw_json TEXT NOT NULL
+    );
+    """)
+
+    for vehicle in vehicles:
+        vin = vehicle.get("vin")
+        if not vin:
+            continue
+
+        cursor.execute("""
+        INSERT INTO vehicles (vin, raw_json)
+        VALUES (?, ?)
+        ON CONFLICT(vin) DO UPDATE SET
+            raw_json = excluded.raw_json;
+        """, (vin, json.dumps(vehicle, ensure_ascii=False)))
+
+    saved_trips = 0
+    for trip in trips:
+        trip_id = trip.get("id")
+        vin = trip.get("vin")
+
+        if trip_id is None:
+            continue
+
+        cursor.execute("""
+        INSERT INTO trips (id, vin, raw_json)
+        VALUES (?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            vin = excluded.vin,
+            raw_json = excluded.raw_json;
+        """, (str(trip_id), vin, json.dumps(trip, ensure_ascii=False)))
+        saved_trips += 1
+
+    conn.commit()
+    conn.close()
+
+    return db_path, len(vehicles), saved_trips
+
+
 if __name__ == "__main__":
-    trip_data = get_trip_data()
-    print(json.dumps(trip_data, indent=2, ensure_ascii=False))
+    vehicle_data = get_vehicles()
+    trip_data = get_trip_data(vehicle_data)
+    db_file, vehicle_count, trip_count = save_to_sqlite(vehicle_data, trip_data)
+
+    print("\n==============================")
+    print(f"SQLite DB aktualisiert: {db_file}")
+    print(f"Vehicles gespeichert/aktualisiert: {vehicle_count}")
+    print(f"Trips gespeichert/aktualisiert: {trip_count}")
