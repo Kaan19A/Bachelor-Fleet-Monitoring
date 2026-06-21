@@ -287,8 +287,46 @@ def trip_row(trip, vehicle_lookup):
     }
 
 
+def table_exists(cursor, table_name):
+    cursor.execute("""
+    SELECT 1
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name = ?;
+    """, (table_name,))
+    return cursor.fetchone() is not None
+
+
+def table_columns(cursor, table_name):
+    cursor.execute(f"PRAGMA table_info({table_name});")
+    return {row[1] for row in cursor.fetchall()}
+
+
+def rename_legacy_table(cursor, table_name):
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    legacy_name = f"legacy_{table_name}_{suffix}"
+    cursor.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_name};")
+    print(f"Alte Tabelle {table_name} nach {legacy_name} verschoben.")
+
+
+def ensure_compatible_schema(cursor):
+    expected_columns = {
+        "vehicles": {"vin", "vehicle_model", "hardware_group", "raw_json"},
+        "trips": {"trip_id", "vin", "start_time", "duration_seconds", "distance_km", "raw_json"},
+    }
+
+    for table_name, required_columns in expected_columns.items():
+        if not table_exists(cursor, table_name):
+            continue
+
+        existing_columns = table_columns(cursor, table_name)
+        if not required_columns.issubset(existing_columns):
+            rename_legacy_table(cursor, table_name)
+
+
 def create_schema(cursor):
     cursor.execute("PRAGMA foreign_keys = ON;")
+    ensure_compatible_schema(cursor)
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS raw_vehicles (
