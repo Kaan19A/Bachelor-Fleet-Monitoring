@@ -113,3 +113,35 @@ def get_all_from_endpoint(url: str):
         return [first]
 
     return []
+
+//Normaliserung Zeitangaben: ISO-8601 -> datetime UTC, epoch seconds, Starttag, Wochentag, Monat
+    def _iso_to_dt(value):
+    """ISO-8601 -> datetime UTC. Akzeptiert '...Z'. 'trip not finished' => None."""
+    if not value:
+        return None
+    if isinstance(value, str) and value.strip().lower() == "trip not finished":
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _to_epoch_seconds(dt):
+    return int(dt.timestamp()) if dt else None
+
+def _start_day(dt):
+    return dt.date().isoformat() if dt else None
+
+def _weekday_mon0(dt):
+    return dt.weekday() if dt else None  # Monday=0..Sunday=6
+
+def _month_yyyy_mm(dt):
+    return f"{dt.year:04d}-{dt.month:02d}" if dt else None
