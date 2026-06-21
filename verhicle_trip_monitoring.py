@@ -65,3 +65,51 @@ def get_json(url: str):
     return r.json()
 
 
+def get_all_from_endpoint(url: str):
+    
+    first = get_json(url)
+
+    if isinstance(first, list):
+        return first
+
+    items = []
+    if isinstance(first, dict) and isinstance(first.get("items"), list):
+        items.extend(first.get("items"))
+        next_url = first.get("next") or (first.get("links") and first.get("links").get("next"))
+        while next_url:
+            page = get_json(next_url)
+            if isinstance(page, dict) and isinstance(page.get("items"), list):
+                items.extend(page.get("items"))
+                next_url = page.get("next") or (page.get("links") and page.get("links").get("next"))
+            else:
+                break
+        return items
+
+    if isinstance(first, dict):
+        all_items = []
+        limit = 200
+        offset = 0
+        while True:
+            paged_url = f"{url}?limit={limit}&offset={offset}"
+            page = get_json(paged_url)
+            if isinstance(page, dict) and isinstance(page.get("items"), list):
+                page_items = page.get("items")
+            elif isinstance(page, list):
+                page_items = page
+            else:
+                break
+
+            if not page_items:
+                break
+            all_items.extend(page_items)
+            if len(page_items) < limit:
+                break
+            offset += limit
+
+        if all_items:
+            return all_items
+
+    if isinstance(first, dict):
+        return [first]
+
+    return []
