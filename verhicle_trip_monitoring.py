@@ -251,3 +251,19 @@ for i, vin in enumerate(vins, start=1):
         trip["start_day"] = _start_day(start_dt)
         trip["start_weekday"] = _weekday_mon0(start_dt)
         trip["start_month"] = _month_yyyy_mm(start_dt)
+
+
+        #Tripdauer soll angezeigt werden nur wenn es ein finished ist sont unfinshed 
+
+        if start_ts is not None and end_ts is not None:
+            duration_seconds = max(0, int(end_ts - start_ts))
+            trip["trip_duration_seconds"] = duration_seconds
+            trip["trip_duration_minutes"] = round(duration_seconds / 60.0, 2)
+        else:
+            trip["trip_duration_seconds"] = None
+            trip["trip_duration_minutes"] = None
+
+        all_trips.append(trip)
+
+        print("\n==============================")
+        print(f"GESAMT Trips über alle Fahrzeuge: {len(all_trips)}")
