@@ -539,3 +539,45 @@ for t in all_trips:
     GROUP BY pairing_state, aktiv_status
     ORDER BY pairing_state, aktiv_status;
     """) 
+
+    # trips pro tag (31 Tage)
+
+    cur.execute("""
+    CREATE VIEW v_trips_per_day_last_31d AS
+    WITH RECURSIVE days(day) AS (
+    SELECT date('now','-30 day')
+    UNION ALL
+    SELECT date(day,'+1 day') FROM days WHERE day < date('now')
+    ),
+    agg AS (
+    SELECT
+    start_day AS day,
+    COUNT(*) AS trips,
+    SUM(CASE WHEN is_finished=0 THEN 1 ELSE 0 END) AS unfinished_trips
+    FROM trips
+    WHERE start_day >= date('now','-30 day')
+    GROUP BY start_day
+    )
+
+    SELECT
+    (strftime('%s', days.day) * 1000) AS time,
+    days.day,
+    COALESCE(agg.trips, 0) AS trips,
+    COALESCE(agg.unfinished_trips, 0) AS unfinished_trips
+    FROM days
+    LEFT JOIN agg ON agg.day = days.day
+    ORDER BY days.day;
+    """)
+
+    conn.commit()
+    conn.close()
+
+    print("\n==============================")
+    print(f" SQLite DB aktualisiert: {db_path}")
+    print(f" Trips gespeichert/aktualisiert: {inserted}")
+    print(f" Vehicles gespeichert/aktualisiert: {len(vehicles)}")
+    print(" Views erstellt:")
+    print("  - v_trips_monitoring")
+    print("  - v_unfinished_trips")
+    print("  - v_vehicle_activity")
+    print("  - v_trips_per_day_last_31d")
