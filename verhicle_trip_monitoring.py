@@ -431,3 +431,59 @@ for t in all_trips:
     vin = t.get("vin")
 
     start_time = t.get("startTime")
+
+    #  Tripdaten mit Fahrzeugmodell und Zeitkennzahlen speichern
+
+    end_time = t.get("endTime") or "trip not finished"
+
+    vehicle_model = t.get("vehicle_model") or vin_to_model.get(vin)
+    vehicle_label = f"{vehicle_model} ({vin})" if vehicle_model else vin
+
+    start_ts = t.get("start_ts")
+    end_ts = t.get("end_ts")
+    is_finished = t.get("is_finished", 0)
+
+    start_day = t.get("start_day")
+    start_weekday = t.get("start_weekday")
+    start_month = t.get("start_month")
+
+    trip_duration_seconds = t.get("trip_duration_seconds")
+    trip_duration_minutes = t.get("trip_duration_minutes")
+
+    if trip_id is None or vin is None:
+        continue
+
+    cur.execute("""
+    INSERT INTO trips (
+        id, vin, vehicle_model, vehicle_label,
+        start_time, end_time,
+        trip_duration_seconds, trip_duration_minutes,
+        start_ts, end_ts, is_finished,
+        start_day, start_weekday, start_month,
+        raw_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        vin = excluded.vin,
+        vehicle_model = excluded.vehicle_model,
+        vehicle_label = excluded.vehicle_label,
+        start_time = excluded.start_time,
+        end_time = excluded.end_time,
+        trip_duration_seconds = excluded.trip_duration_seconds,
+        trip_duration_minutes = excluded.trip_duration_minutes,
+        start_ts = excluded.start_ts,
+        end_ts = excluded.end_ts,
+        is_finished = excluded.is_finished,
+        start_day = excluded.start_day,
+        start_weekday = excluded.start_weekday,
+        start_month = excluded.start_month,
+        raw_json = excluded.raw_json;
+    """, (
+        trip_id, vin, vehicle_model, vehicle_label,
+        start_time, end_time,
+        trip_duration_seconds, trip_duration_minutes,
+        start_ts, end_ts, is_finished,
+        start_day, start_weekday, start_month,
+        json.dumps(t, ensure_ascii=False)
+    ))
+    inserted += 1
