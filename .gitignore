@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 # SQLite database files
+*.db
 *.sqlite
 *.sqlite3
 
