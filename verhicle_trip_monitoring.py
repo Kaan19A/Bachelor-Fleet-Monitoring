@@ -243,4 +243,11 @@ for i, vin in enumerate(vins, start=1):
 
         is_finished = 1 if end_ts is not None else 0
 
+        #unfinished trips sollen sichtbar sein
 
+        trip["start_ts"] = start_ts
+        trip["end_ts"] = end_ts
+        trip["is_finished"] = is_finished
+        trip["start_day"] = _start_day(start_dt)
+        trip["start_weekday"] = _weekday_mon0(start_dt)
+        trip["start_month"] = _month_yyyy_mm(start_dt)
