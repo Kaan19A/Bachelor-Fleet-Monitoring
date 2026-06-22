@@ -272,3 +272,102 @@ for i, vin in enumerate(vins, start=1):
 
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
+
+        #erweiterung der Tabelle für die Speicherung der Fahrzeugdaten
+
+        cur.execute("""
+CREATE TABLE IF NOT EXISTS vehicles (
+    vin TEXT PRIMARY KEY,
+    model TEXT,
+    pairing_state TEXT,
+    mosdon_id TEXT,
+    license_plate TEXT,
+    odometer REAL,
+    fuel_level REAL,
+    last_communication TEXT,
+    last_communication_ts INTEGER,
+    current_fleet TEXT,
+    current_technicians TEXT,
+    diagnosis TEXT,
+    raw_json TEXT
+);
+""")
+
+# Columns sicherstellen (für bestehende DB)
+for col_def in [
+    "model TEXT",
+    "pairing_state TEXT",
+    "mosdon_id TEXT",
+    "license_plate TEXT",
+    "odometer REAL",
+    "fuel_level REAL",
+    "last_communication TEXT",
+    "last_communication_ts INTEGER",
+    "current_fleet TEXT",
+    "current_technicians TEXT",
+    "diagnosis TEXT",
+    "raw_json TEXT",
+]:
+    try:
+        cur.execute(f"ALTER TABLE vehicles ADD COLUMN {col_def};")
+    except sqlite3.OperationalError:
+        pass
+
+cur.execute("CREATE INDEX IF NOT EXISTS idx_vehicles_model ON vehicles(model);")
+cur.execute("CREATE INDEX IF NOT EXISTS idx_vehicles_pairing_state ON vehicles(pairing_state);")
+cur.execute("CREATE INDEX IF NOT EXISTS idx_vehicles_last_comm_ts ON vehicles(last_communication_ts);")
+
+for v in vehicles:
+    vin_key = v.get("vin")
+    if not vin_key:
+        continue
+
+    model = v.get("model")
+    pairing_state = v.get("pairingState")
+    mosdon_id = v.get("mosdonId")
+    license_plate = v.get("licensePlate")
+
+    vehicle_data = v.get("vehicleData") if isinstance(v.get("vehicleData"), dict) else {}
+    odometer = vehicle_data.get("odometer")
+    fuel_level = vehicle_data.get("fuelLevel")
+    last_communication = vehicle_data.get("lastCommunication")
+    last_comm_ts = _to_epoch_seconds(_iso_to_dt(last_communication))
+
+    current_fleet = v.get("currentFleet")
+    if isinstance(current_fleet, dict):
+        current_fleet = current_fleet.get("name")
+
+    current_technicians = v.get("currentTechnicians")
+    if isinstance(current_technicians, (dict, list)):
+        current_technicians = json.dumps(current_technicians, ensure_ascii=False)
+
+    diagnosis = v.get("diagnosis")
+    if isinstance(diagnosis, (dict, list)):
+        diagnosis = json.dumps(diagnosis, ensure_ascii=False)
+
+    cur.execute("""
+    INSERT INTO vehicles (
+        vin, model, pairing_state, mosdon_id, license_plate,
+        odometer, fuel_level, last_communication, last_communication_ts,
+        current_fleet, current_technicians, diagnosis, raw_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(vin) DO UPDATE SET
+        model = excluded.model,
+        pairing_state = excluded.pairing_state,
+        mosdon_id = excluded.mosdon_id,
+        license_plate = excluded.license_plate,
+        odometer = excluded.odometer,
+        fuel_level = excluded.fuel_level,
+        last_communication = excluded.last_communication,
+        last_communication_ts = excluded.last_communication_ts,
+        current_fleet = excluded.current_fleet,
+        current_technicians = excluded.current_technicians,
+        diagnosis = excluded.diagnosis,
+        raw_json = excluded.raw_json;
+    """, (
+        vin_key, model, pairing_state, mosdon_id, license_plate,
+        odometer, fuel_level, last_communication, last_comm_ts,
+        current_fleet, current_technicians, diagnosis,
+        json.dumps(v, ensure_ascii=False)
+    ))
