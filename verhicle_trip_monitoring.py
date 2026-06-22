@@ -504,3 +504,20 @@ for t in all_trips:
     FROM trips
     WHERE start_ts IS NOT NULL;
     """)
+
+    #unfinished Trips (Table laufzeit in min)
+    cur.execute("""
+    CREATE VIEW v_unfinished_trips AS
+    SELECT
+    (start_ts * 1000) AS time,
+    vin,
+    vehicle_model,
+    vehicle_label,
+    start_time,
+    end_time,
+    (strftime('%s','now') - start_ts) / 60.0 AS minutes_running
+    FROM trips
+    WHERE is_finished = 0
+    AND start_ts IS NOT NULL
+    ORDER BY start_ts DESC;
+    """)
