@@ -521,3 +521,21 @@ for t in all_trips:
     AND start_ts IS NOT NULL
     ORDER BY start_ts DESC;
     """)
+
+    # verhicle active/inactive view letze 30 min
+
+    cur.execute("""
+    CREATE VIEW v_vehicle_activity AS
+    SELECT
+    pairing_state,
+    CASE
+    WHEN last_communication_ts IS NOT NULL
+    AND last_communication_ts >= (strftime('%s','now') - 30*60)
+    THEN 'aktiv'
+    ELSE 'inaktiv'
+    END AS aktiv_status,
+    COUNT(*) AS fahrzeuge
+    FROM vehicles
+    GROUP BY pairing_state, aktiv_status
+    ORDER BY pairing_state, aktiv_status;
+    """) 
