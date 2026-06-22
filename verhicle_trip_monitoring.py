@@ -166,3 +166,36 @@ if not vins:
     raise ValueError("Keine VINs im Vehicles-Response gefunden")
 
 print(f"Fahrzeuge: {len(vehicles)} | VINs: {len(vins)}")
+
+#Fahrzeugdaten nach Vin zuordnen
+
+vin_to_model = {}
+vin_to_vehicle_data = {}
+vin_to_vehicle_info = {}
+
+for v in vehicles:
+    vin_key = v.get("vin")
+    model = v.get("model")  
+    if vin_key:
+        vin_to_model[vin_key] = model
+
+        vehicle_data = v.get("vehicleData") if isinstance(v.get("vehicleData"), dict) else {}
+        vin_to_vehicle_data[vin_key] = {
+            "pairing_state": v.get("pairingState"),
+            "fuel_level": vehicle_data.get("fuelLevel"),
+            "odometer": vehicle_data.get("odometer"),
+            "last_communication": vehicle_data.get("lastCommunication")
+        }
+
+        vin_to_vehicle_info[vin_key] = {
+            "vin": v.get("vin"),
+            "model": v.get("model"),
+            "pairing_state": v.get("pairingState"),
+            "mosdon_id": v.get("mosdonId"),
+            "license_plate": v.get("licensePlate"),
+            "vehicle_data": vehicle_data,
+            "current_fleet": v.get("currentFleet"),
+            "current_technicians": v.get("currentTechnicians"),
+            "diagnosis": v.get("diagnosis"),
+            "raw_vehicle": v
+        }
