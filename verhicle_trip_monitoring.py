@@ -253,7 +253,7 @@ for i, vin in enumerate(vins, start=1):
         trip["start_month"] = _month_yyyy_mm(start_dt)
 
 
-        #Tripdauer soll angezeigt werden nur wenn es ein finished ist sont unfinshed 
+        #Tripdauer soll angezeigt werden nur wenn es ein finished ist sonst unfinshed 
 
         if start_ts is not None and end_ts is not None:
             duration_seconds = max(0, int(end_ts - start_ts))
@@ -267,3 +267,8 @@ for i, vin in enumerate(vins, start=1):
 
         print("\n==============================")
         print(f"GESAMT Trips über alle Fahrzeuge: {len(all_trips)}")
+
+        #sqlite speicherung der Trips und Vehicles
+
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
