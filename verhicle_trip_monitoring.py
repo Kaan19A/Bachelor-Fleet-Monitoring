@@ -199,3 +199,46 @@ for v in vehicles:
             "diagnosis": v.get("diagnosis"),
             "raw_vehicle": v
         }
+
+        # Trips für jede Vin holen
+
+ all_trips = []
+
+for i, vin in enumerate(vins, start=1):
+    trips_data = get_json(f"{BASE_URL}/trips/vehicle/{vin}")
+
+    if isinstance(trips_data, dict) and isinstance(trips_data.get("items"), list):
+        trips = trips_data["items"]
+    elif isinstance(trips_data, list):
+        trips = trips_data
+    else:
+        trips = [trips_data]
+
+    print(f"[{i}/{len(vins)}] VIN={vin} | Trips={len(trips)}")
+
+    for trip in trips:
+        if not isinstance(trip, dict):
+            continue
+
+        trip["vin"] = vin
+        trip["vehicle_model"] = vin_to_model.get(vin)
+
+        vehicle_data = vin_to_vehicle_data.get(vin, {})
+        trip["pairing_state"] = vehicle_data.get("pairing_state")
+        trip["fuel_level"] = vehicle_data.get("fuel_level")
+        trip["odometer"] = vehicle_data.get("odometer")
+        trip["last_communication"] = vehicle_data.get("last_communication")
+
+        trip["vehicle_info"] = vin_to_vehicle_info.get(vin, {})
+
+        # --- Normalisierung: Zeiten + Flags (Grafana-friendly)
+        start_time = trip.get("startTime")
+        end_time = trip.get("endTime")
+
+        start_dt = _iso_to_dt(start_time)
+        end_dt = _iso_to_dt(end_time)
+
+        start_ts = _to_epoch_seconds(start_dt)
+        end_ts = _to_epoch_seconds(end_dt)
+
+        is_finished = 1 if end_ts is not None else 0
