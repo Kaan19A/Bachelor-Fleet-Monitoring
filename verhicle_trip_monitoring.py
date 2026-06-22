@@ -114,7 +114,7 @@ def get_all_from_endpoint(url: str):
 
     return []
 
-//Normaliserung Zeitangaben: ISO-8601 -> datetime UTC, epoch seconds, Starttag, Wochentag, Monat
+#Normaliserung Zeitangaben: ISO-8601 -> datetime UTC, epoch seconds, Starttag, Wochentag, Monat
     def _iso_to_dt(value):
     """ISO-8601 -> datetime UTC. Akzeptiert '...Z'. 'trip not finished' => None."""
     if not value:
@@ -146,7 +146,7 @@ def _weekday_mon0(dt):
 def _month_yyyy_mm(dt):
     return f"{dt.year:04d}-{dt.month:02d}" if dt else None
 
-// Alle Fahrzeuge holen
+# Alle Fahrzeuge holen 
 
     vehicles_data = get_json(f"{BASE_URL}/vehicles")
 
@@ -156,3 +156,13 @@ elif isinstance(vehicles_data, list):
     vehicles = vehicles_data
 else:
     raise ValueError("Unerwartetes Format von /vehicles")
+
+#xtraktion der Vins
+
+vins = [v["vin"] for v in vehicles if "vin" in v]
+vins = list(dict.fromkeys(vins))
+
+if not vins:
+    raise ValueError("Keine VINs im Vehicles-Response gefunden")
+
+print(f"Fahrzeuge: {len(vehicles)} | VINs: {len(vins)}")
