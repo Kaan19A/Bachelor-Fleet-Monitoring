@@ -487,3 +487,20 @@ for t in all_trips:
         json.dumps(t, ensure_ascii=False)
     ))
     inserted += 1
+
+    #Grafana Trip Views 
+    cur.execute("""
+    CREATE VIEW v_trips_monitoring AS
+    SELECT
+    (start_ts * 1000) AS time,
+    vin,
+    vehicle_model,
+    vehicle_label,
+    is_finished,
+    trip_duration_minutes,
+    start_day,
+    start_weekday,
+    start_month
+    FROM trips
+    WHERE start_ts IS NOT NULL;
+    """)
