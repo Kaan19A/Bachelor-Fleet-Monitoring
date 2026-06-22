@@ -231,7 +231,7 @@ for i, vin in enumerate(vins, start=1):
 
         trip["vehicle_info"] = vin_to_vehicle_info.get(vin, {})
 
-        # --- Normalisierung: Zeiten + Flags (Grafana-friendly)
+        #normalisierung der timesstamps für die trips
         start_time = trip.get("startTime")
         end_time = trip.get("endTime")
 
@@ -242,3 +242,5 @@ for i, vin in enumerate(vins, start=1):
         end_ts = _to_epoch_seconds(end_dt)
 
         is_finished = 1 if end_ts is not None else 0
+
+
