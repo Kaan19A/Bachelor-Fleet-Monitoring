@@ -371,3 +371,63 @@ for v in vehicles:
         current_fleet, current_technicians, diagnosis,
         json.dumps(v, ensure_ascii=False)
     ))
+
+    # trips tabellen felder nromalisiert
+
+    cur.execute("""
+CREATE TABLE IF NOT EXISTS trips (
+    id INTEGER PRIMARY KEY,
+    vin TEXT NOT NULL,
+    vehicle_model TEXT,
+    vehicle_label TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    trip_duration_seconds INTEGER,
+    trip_duration_minutes REAL,
+
+    -- Normalisierung für Grafana
+    start_ts INTEGER,
+    end_ts INTEGER,
+    is_finished INTEGER,
+    start_day TEXT,
+    start_weekday INTEGER,
+    start_month TEXT,
+
+    raw_json TEXT
+);
+""")
+
+# columns sicherstellen
+for col_def in [
+    "vehicle_model TEXT",
+    "vehicle_label TEXT",
+    "trip_duration_seconds INTEGER",
+    "trip_duration_minutes REAL",
+    "start_ts INTEGER",
+    "end_ts INTEGER",
+    "is_finished INTEGER",
+    "start_day TEXT",
+    "start_weekday INTEGER",
+    "start_month TEXT",
+    "raw_json TEXT",
+]:
+    try:
+        cur.execute(f"ALTER TABLE trips ADD COLUMN {col_def};")
+    except sqlite3.OperationalError:
+        pass
+
+cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_vin ON trips(vin);")
+cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_start_ts ON trips(start_ts);")
+cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_finished ON trips(is_finished);")
+cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_vehicle_model ON trips(vehicle_model);")
+cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_start_day ON trips(start_day);")
+
+inserted = 0
+for t in all_trips:
+    if not isinstance(t, dict):
+        continue
+
+    trip_id = t.get("id")
+    vin = t.get("vin")
+
+    start_time = t.get("startTime")
