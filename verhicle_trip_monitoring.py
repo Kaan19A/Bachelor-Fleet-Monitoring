@@ -397,6 +397,13 @@ for v in vehicles:
 
 # trips tabellen felder nromalisiert
 
+cur.execute("PRAGMA table_info(trips);")
+trip_columns = [column[1] for column in cur.fetchall()]
+if trip_columns and "id" not in trip_columns:
+    legacy_trips_table = f"legacy_trips_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    cur.execute(f"ALTER TABLE trips RENAME TO {legacy_trips_table};")
+    print(f"Alte trips Tabelle nach {legacy_trips_table} verschoben.")
+
 cur.execute("""
 CREATE TABLE IF NOT EXISTS trips (
     id INTEGER PRIMARY KEY,
@@ -512,6 +519,11 @@ for t in all_trips:
     inserted += 1
 
 #Grafana Trip Views 
+cur.execute("DROP VIEW IF EXISTS v_trips_monitoring;")
+cur.execute("DROP VIEW IF EXISTS v_unfinished_trips;")
+cur.execute("DROP VIEW IF EXISTS v_vehicle_activity;")
+cur.execute("DROP VIEW IF EXISTS v_trips_per_day_last_31d;")
+
 cur.execute("""
     CREATE VIEW v_trips_monitoring AS
     SELECT
