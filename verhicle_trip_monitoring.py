@@ -9,7 +9,30 @@ import requests
 BASE_URL = "https://api.cartelsol.mosdon-dev.com"
 TOKEN_URL = "https://auth.cartelsol.mosdon-dev.com/oauth2/token"
 
+def load_env_file(path=".env"):
+    if not os.path.exists(path):
+        return
+
+    with open(path, encoding="utf-8") as env_file:
+        for line in env_file:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+load_env_file()
+
+ACCESS_TOKEN = os.getenv("CARTELSOL_BEARER_TOKEN")
+REFRESH_TOKEN = os.getenv("CARTELSOL_REFRESH_TOKEN")
+CLIENT_ID = os.getenv("CLIENT_ID")
+db_path = os.getenv("SQLITE_DB_PATH", "fleet_monitoring.db")
+
 def _headers():
+    if not ACCESS_TOKEN:
+        raise ValueError("Bitte CARTELSOL_BEARER_TOKEN in der .env Datei eintragen.")
+
     return {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Accept": "application/json"
@@ -115,7 +138,7 @@ def get_all_from_endpoint(url: str):
     return []
 
 #Normaliserung Zeitangaben: ISO-8601 -> datetime UTC, epoch seconds, Starttag, Wochentag, Monat
-    def _iso_to_dt(value):
+def _iso_to_dt(value):
     """ISO-8601 -> datetime UTC. Akzeptiert '...Z'. 'trip not finished' => None."""
     if not value:
         return None
@@ -148,7 +171,7 @@ def _month_yyyy_mm(dt):
 
 # Alle Fahrzeuge holen 
 
-    vehicles_data = get_json(f"{BASE_URL}/vehicles")
+vehicles_data = get_json(f"{BASE_URL}/vehicles")
 
 if isinstance(vehicles_data, dict) and isinstance(vehicles_data.get("items"), list):
     vehicles = vehicles_data["items"]
@@ -200,9 +223,9 @@ for v in vehicles:
             "raw_vehicle": v
         }
 
-        # Trips für jede Vin holen
+# Trips für jede Vin holen
 
- all_trips = []
+all_trips = []
 
 for i, vin in enumerate(vins, start=1):
     trips_data = get_json(f"{BASE_URL}/trips/vehicle/{vin}")
@@ -265,17 +288,17 @@ for i, vin in enumerate(vins, start=1):
 
         all_trips.append(trip)
 
-        print("\n==============================")
-        print(f"GESAMT Trips über alle Fahrzeuge: {len(all_trips)}")
+print("\n==============================")
+print(f"GESAMT Trips über alle Fahrzeuge: {len(all_trips)}")
 
-        #sqlite speicherung der Trips und Vehicles
+#sqlite speicherung der Trips und Vehicles
 
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
 
-        #erweiterung der Tabelle für die Speicherung der Fahrzeugdaten
+#erweiterung der Tabelle für die Speicherung der Fahrzeugdaten
 
-        cur.execute("""
+cur.execute("""
 CREATE TABLE IF NOT EXISTS vehicles (
     vin TEXT PRIMARY KEY,
     model TEXT,
@@ -372,9 +395,9 @@ for v in vehicles:
         json.dumps(v, ensure_ascii=False)
     ))
 
-    # trips tabellen felder nromalisiert
+# trips tabellen felder nromalisiert
 
-    cur.execute("""
+cur.execute("""
 CREATE TABLE IF NOT EXISTS trips (
     id INTEGER PRIMARY KEY,
     vin TEXT NOT NULL,
@@ -488,8 +511,8 @@ for t in all_trips:
     ))
     inserted += 1
 
-    #Grafana Trip Views 
-    cur.execute("""
+#Grafana Trip Views 
+cur.execute("""
     CREATE VIEW v_trips_monitoring AS
     SELECT
     (start_ts * 1000) AS time,
@@ -505,8 +528,8 @@ for t in all_trips:
     WHERE start_ts IS NOT NULL;
     """)
 
-    #unfinished Trips (Table laufzeit in min)
-    cur.execute("""
+#unfinished Trips (Table laufzeit in min)
+cur.execute("""
     CREATE VIEW v_unfinished_trips AS
     SELECT
     (start_ts * 1000) AS time,
@@ -522,9 +545,9 @@ for t in all_trips:
     ORDER BY start_ts DESC;
     """)
 
-    # verhicle active/inactive view letze 30 min
+# verhicle active/inactive view letze 30 min
 
-    cur.execute("""
+cur.execute("""
     CREATE VIEW v_vehicle_activity AS
     SELECT
     pairing_state,
@@ -540,44 +563,43 @@ for t in all_trips:
     ORDER BY pairing_state, aktiv_status;
     """) 
 
-    # trips pro tag (31 Tage)
+# trips pro tag letzte (31 Tage)
 
-    cur.execute("""
-    CREATE VIEW v_trips_per_day_last_31d AS
-    WITH RECURSIVE days(day) AS (
-    SELECT date('now','-30 day')
-    UNION ALL
-    SELECT date(day,'+1 day') FROM days WHERE day < date('now')
-    ),
-    agg AS (
-    SELECT
+cur.execute("""
+CREATE VIEW v_trips_per_day_last_31d AS
+WITH RECURSIVE days(day) AS (
+  SELECT date('now','-30 day')
+  UNION ALL
+  SELECT date(day,'+1 day') FROM days WHERE day < date('now')
+),
+agg AS (
+  SELECT
     start_day AS day,
     COUNT(*) AS trips,
     SUM(CASE WHEN is_finished=0 THEN 1 ELSE 0 END) AS unfinished_trips
-    FROM trips
-    WHERE start_day >= date('now','-30 day')
-    GROUP BY start_day
-    )
+  FROM trips
+  WHERE start_day >= date('now','-30 day')
+  GROUP BY start_day
+)
+SELECT
+  (strftime('%s', days.day) * 1000) AS time,
+  days.day,
+  COALESCE(agg.trips, 0) AS trips,
+  COALESCE(agg.unfinished_trips, 0) AS unfinished_trips
+FROM days
+LEFT JOIN agg ON agg.day = days.day
+ORDER BY days.day;
+""")
 
-    SELECT
-    (strftime('%s', days.day) * 1000) AS time,
-    days.day,
-    COALESCE(agg.trips, 0) AS trips,
-    COALESCE(agg.unfinished_trips, 0) AS unfinished_trips
-    FROM days
-    LEFT JOIN agg ON agg.day = days.day
-    ORDER BY days.day;
-    """)
+conn.commit()
+conn.close()
 
-    conn.commit()
-    conn.close()
-
-    print("\n==============================")
-    print(f" SQLite DB aktualisiert: {db_path}")
-    print(f" Trips gespeichert/aktualisiert: {inserted}")
-    print(f" Vehicles gespeichert/aktualisiert: {len(vehicles)}")
-    print(" Views erstellt:")
-    print("  - v_trips_monitoring")
-    print("  - v_unfinished_trips")
-    print("  - v_vehicle_activity")
-    print("  - v_trips_per_day_last_31d")
+print("\n==============================")
+print(f" SQLite DB aktualisiert: {db_path}")
+print(f" Trips gespeichert/aktualisiert: {inserted}")
+print(f" Vehicles gespeichert/aktualisiert: {len(vehicles)}")
+print(" Views erstellt:")
+print("  - v_trips_monitoring")
+print("  - v_unfinished_trips")
+print("  - v_vehicle_activity")
+print("  - v_trips_per_day_last_31d")
