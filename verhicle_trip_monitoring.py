@@ -201,55 +201,29 @@ class TokenManager:
             if response.status_code >= 400:
                 oauth_error = response_data.get("error", "unbekannt")
                 description = response_data.get("error_description", "keine Beschreibung")
+                # wenn token abgelaufen oder invalid ist wird selbst nachgetragen
 
-def get_all_from_endpoint(url: str):
-    
-    first = get_json(url)
+             raise TokenRefreshError(
+                    f"Token-Endpunkt Fehler: HTTP {response.status_code}, "
+                    f"error={oauth_error}, description={description}"
+                )
 
-    if isinstance(first, list):
-        return first
+            new_access_token = response_data.get("access_token")
+            if not new_access_token:
+                raise TokenRefreshError(
+                    f"Refresh ok, aber access_token fehlt. Felder: {list(response_data.keys())}"
+                )
 
-    items = []
-    if isinstance(first, dict) and isinstance(first.get("items"), list):
-        items.extend(first.get("items"))
-        next_url = first.get("next") or (first.get("links") and first.get("links").get("next"))
-        while next_url:
-            page = get_json(next_url)
-            if isinstance(page, dict) and isinstance(page.get("items"), list):
-                items.extend(page.get("items"))
-                next_url = page.get("next") or (page.get("links") and page.get("links").get("next"))
-            else:
-                break
-        return items
+            self.access_token = new_access_token
+            new_refresh_token = response_data.get("refresh_token")
+            if new_refresh_token and new_refresh_token != self.refresh_token:
+                self.refresh_token = new_refresh_token
+                log.info("Neuer (rotierter) Refresh-Token uebernommen")
 
-    if isinstance(first, dict):
-        all_items = []
-        limit = 200
-        offset = 0
-        while True:
-            paged_url = f"{url}?limit={limit}&offset={offset}"
-            page = get_json(paged_url)
-            if isinstance(page, dict) and isinstance(page.get("items"), list):
-                page_items = page.get("items")
-            elif isinstance(page, list):
-                page_items = page
-            else:
-                break
+                #Sofort speichern, bei token rotation 
+            self.save_tokens()
+            log.info("Access-Token erneuert")
 
-            if not page_items:
-                break
-            all_items.extend(page_items)
-            if len(page_items) < limit:
-                break
-            offset += limit
-
-        if all_items:
-            return all_items
-
-    if isinstance(first, dict):
-        return [first]
-
-    return []
 
 #Normaliserung Zeitangaben: ISO-8601 -> datetime UTC, epoch seconds, Starttag, Wochentag, Monat
 def _iso_to_dt(value):
