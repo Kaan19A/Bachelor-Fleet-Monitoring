@@ -89,65 +89,118 @@ lines = []
     for key, value in updates.items():
         os.environ[key] = value
 
-        
-def _headers():
-    if not ACCESS_TOKEN:
-        raise ValueError("Bitte CARTELSOL_BEARER_TOKEN in der .env Datei eintragen.")
+#Token Verwaltung 
 
-    return {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Accept": "application/json"
-    }
 
-def refresh_access_token():
-    """
-    Refresh über Auth-Service (OAuth2 Token Endpoint):
-    POST https://auth.cartelsol.mosdon-dev.com/oauth2/token
-    Body (form-urlencoded):
-      grant_type=refresh_token
-      refresh_token=...
-    """
-    global ACCESS_TOKEN, REFRESH_TOKEN
+class TokenRefreshError(RuntimeError):
+    pass
 
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN,
-        "client_id": CLIENT_ID
-    }
 
-    r = requests.post(
-        TOKEN_URL,
-        data=data,  # form-urlencoded ist Standard für /oauth2/token
-        headers={"Accept": "application/json"},
-        timeout=30
-    )
-    print(f"POST {TOKEN_URL} -> {r.status_code}")
-    r.raise_for_status()
+class TokenManager:
+    def __init__(self, token_url, client_id, client_secret=None, env_file=ENV_PATH,
+                 base_url=None):
+        self.token_url = token_url
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.env_file = env_file
+        self.base_url = base_url
+        self.access_token = None
+        self.refresh_token = None
+        self._lock = threading.Lock()
 
-    resp = r.json() if r.content else {}
+    @staticmethod
+    def _clean_token(value):
+        if not value or value.startswith("HIER_"):
+            return None
+        return value
 
-    if "access_token" not in resp:
-        raise RuntimeError(f"Refresh ok, aber access_token fehlt. Keys: {list(resp.keys())}")
+    def load_tokens(self):
+        self.access_token = self._clean_token(os.getenv("ACCESS_TOKEN"))
+        self.refresh_token = self._clean_token(os.getenv("REFRESH_TOKEN"))
 
-    ACCESS_TOKEN = resp["access_token"]
-    # refresh_token kommt nicht immer neu zurück -> alten behalten
-    REFRESH_TOKEN = resp.get("refresh_token", REFRESH_TOKEN)
+        if not self.refresh_token:
+            raise RuntimeError(
+                f"REFRESH_TOKEN fehlt in {self.env_file}. Bitte eintragen."
+            )
+        if not self.access_token:
+            log.info("Kein Access-Token vorhanden -> wird per Refresh erzeugt")
+            self.refresh_access_token()
 
-    print("✅ Neuer access_token geholt")
+    def save_tokens(self):
+        """Persistiert Tokens. Bei Fehler: CRITICAL + Exception (kein stiller Lockout)."""
+        try:
+            save_dotenv_values(self.env_file, {
+                "BASE_URL": self.base_url,
+                "TOKEN_URL": self.token_url,
+                "CLIENT_ID": self.client_id,
+                "ACCESS_TOKEN": self.access_token,
+                "REFRESH_TOKEN": self.refresh_token,
+            })
+            log.info("Env-Datei aktualisiert (Tokens gespeichert)")
+        except OSError as exc:
+            log.critical(
+                "TOKEN-PERSISTENZ FEHLGESCHLAGEN beim Schreiben von %s: %s. "
+                "Falls der Server den Refresh-Token rotiert, ist der neue Token jetzt "
+                "verloren -> moeglicher dauerhafter Lockout. Sofort pruefen!",
+                self.env_file, exc,
+            )
+            raise TokenRefreshError(
+                f"Tokens konnten nicht in {self.env_file} gespeichert werden: {exc}"
+            ) from exc
 
-def get_json(url: str):
-    r = requests.get(url, headers=_headers(), timeout=30)
-    print(f"GET {url} -> {r.status_code}")
+    def get_access_token(self):
+        if not self.access_token:
+            self.refresh_access_token()
+        return self.access_token
 
-    if r.status_code == 401:
-        print("401 Unauthorized -> refreshe Access Token und retry...")
-        refresh_access_token()
-        r = requests.get(url, headers=_headers(), timeout=30)
-        print(f"GET (retry) {url} -> {r.status_code}")
+    def refresh_access_token(self):
+        with self._lock:
+            if not self.client_id:
+                raise RuntimeError("CLIENT_ID fehlt.")
+            if not self.refresh_token:
+                raise RuntimeError("REFRESH_TOKEN fehlt. Token-Refresh nicht moeglich.")
 
-    r.raise_for_status()
-    return r.json()
+            data = {
+                "grant_type": "refresh_token",
+                "refresh_token": self.refresh_token,
+            }
+            auth = None
+            if self.client_secret:
+                auth = (self.client_id, self.client_secret)
+            else:
+                data["client_id"] = self.client_id
 
+            try:
+                response = requests.post(
+                    self.token_url,
+                    data=data,
+                    auth=auth,
+                    headers={"Accept": "application/json"},
+                    timeout=HTTP_TIMEOUT,
+                )
+                log.info("POST %s -> %s", self.token_url, response.status_code)
+            except requests.exceptions.SSLError as exc:
+                raise TokenRefreshError(
+                    "Token-Refresh wegen TLS-Zertifikatsfehler fehlgeschlagen "
+                    "(kein unsicherer Fallback verwendet)."
+                ) from exc
+            except requests.exceptions.Timeout as exc:
+                raise TokenRefreshError("Token-Refresh wegen Timeout fehlgeschlagen.") from exc
+            except requests.exceptions.ConnectionError as exc:
+                raise TokenRefreshError("Token-Refresh wegen Verbindungsfehler fehlgeschlagen.") from exc
+            except requests.exceptions.RequestException as exc:
+                raise TokenRefreshError("Token-Refresh wegen Request-Fehler fehlgeschlagen.") from exc
+
+            response_data = {}
+            if response.content:
+                try:
+                    response_data = response.json()
+                except ValueError:
+                    response_data = {}
+
+            if response.status_code >= 400:
+                oauth_error = response_data.get("error", "unbekannt")
+                description = response_data.get("error_description", "keine Beschreibung")
 
 def get_all_from_endpoint(url: str):
     
