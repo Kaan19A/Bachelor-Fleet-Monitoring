@@ -1,12 +1,28 @@
-import hashlib
+#!/usr/bin/env python3
+"""Automatisiertes Monitoring der Fahrzeug-Tripdaten.
+
+Lauf-Modell (Firmenserver):
+  - Cronjob laeuft als User 'grafana'
+  - Env-Datei:  /etc/tripdaten-mon/tripdaten-mon.env   (Verzeichnis gehoert grafana, damit
+                das atomare .tmp-Schreiben funktioniert)
+  - SQLite-DB:  /var/lib/grafana/sqlite/trips.db        (gehoert grafana -> Grafana liest WAL sauber)
+  - Logdatei:   /var/log/tripdaten-mon/tripdaten-mon.log
+
+Designziel: dauerhaft stabil. Ein einzelner fehlerhafter API-Request darf den
+Gesamtlauf NICHT stoppen; transiente Fehler werden mit Retry abgefangen; rotierte
+Refresh-Tokens werden sofort sicher persistiert.
+"""
+
 import json
-import os
-import sqlite3
-import time
 import logging
+import os
+import sys
+import threading
+import time
 from datetime import datetime, timezone
 
 import requests
+import sqlite3
 
 try:
     from dotenv import load_dotenv
@@ -17,8 +33,10 @@ except ImportError:  # pragma: no cover - klare Fehlermeldung statt kryptischem 
     )
     raise
 
-#Env variablen sollen überschreibar sein, daher zuerst laden und dann überschreiben
 
+# ==========================================================
+# Konfiguration (alles ueber Env-Variablen ueberschreibbar)
+# ==========================================================
 ENV_PATH = os.getenv("TRIPMON_ENV", "/etc/tripdaten-mon/tripdaten-mon.env")
 DB_PATH = os.getenv("TRIPMON_DB", "/var/lib/grafana/sqlite/trips.db")
 LOG_PATH = os.getenv("TRIPMON_LOG", "/var/log/tripdaten-mon/tripdaten-mon.log")
@@ -29,8 +47,9 @@ HTTP_BACKOFF = 5           # Sekunden, multipliziert mit Versuchsnummer
 SQLITE_TIMEOUT = 30        # Sekunden busy-timeout beim Verbinden
 
 
-#Logging Datei für das Monitoring und terminal ausgabe
-
+# ==========================================================
+# Logging (Datei + stderr, mit Zeitstempel und Level)
+# ==========================================================
 def _setup_logging():
     handlers = [logging.StreamHandler(sys.stderr)]
     try:
@@ -47,10 +66,17 @@ def _setup_logging():
 
 log = logging.getLogger("tripdaten-mon")
 
-# Speicherung aktualisierter Token in der Env-Datei hinzufügen
-def save_dotenv_values(path, updates):
 
-lines = []
+# ==========================================================
+# Atomare Env-Datei schreiben (tmp + fsync + replace + chmod)
+# ==========================================================
+def save_dotenv_values(path, updates):
+    """Schreibt Schluessel/Werte atomar zurueck in die Env-Datei.
+
+    Wirft bei Fehler eine Exception (NICHT schlucken!), damit ein verlorener
+    rotierter Refresh-Token sofort auffaellt und der Lauf hart abbricht.
+    """
+    lines = []
     seen = set()
 
     if os.path.exists(path):
@@ -89,9 +115,10 @@ lines = []
     for key, value in updates.items():
         os.environ[key] = value
 
-#Token Verwaltung 
 
-
+# ==========================================================
+# Token-Verwaltung
+# ==========================================================
 class TokenRefreshError(RuntimeError):
     pass
 
@@ -201,9 +228,8 @@ class TokenManager:
             if response.status_code >= 400:
                 oauth_error = response_data.get("error", "unbekannt")
                 description = response_data.get("error_description", "keine Beschreibung")
-                # wenn token abgelaufen oder invalid ist wird selbst nachgetragen
-
-             raise TokenRefreshError(
+                # invalid_grant => Refresh-Token selbst ist tot/abgelaufen -> manueller Eingriff
+                raise TokenRefreshError(
                     f"Token-Endpunkt Fehler: HTTP {response.status_code}, "
                     f"error={oauth_error}, description={description}"
                 )
@@ -220,12 +246,14 @@ class TokenManager:
                 self.refresh_token = new_refresh_token
                 log.info("Neuer (rotierter) Refresh-Token uebernommen")
 
-                #Sofort speichern, bei token rotation 
+            # Sofort persistieren -> bei Rotation darf hier nichts verloren gehen
             self.save_tokens()
             log.info("Access-Token erneuert")
 
-#Http fehler Handling für die API requests
 
+# ==========================================================
+# HTTP mit Retry (transiente Fehler) + zentralem 401-Handling
+# ==========================================================
 def _is_transient_status(status):
     return status in (429, 500, 502, 503, 504)
 
@@ -271,10 +299,10 @@ def get_json(url, token_manager, _already_refreshed=False):
 
 
 def get_all_from_endpoint(url, token_manager):
-    """Holt alle Items eines  Endpoints. """
-                       
+    """Holt alle Items eines (ggf. paginierten) Endpoints.
+
     Unterstuetzt: direkte Liste, {"items":[...]}, 'next'-Link, limit/offset.
-    
+    """
     first = get_json(url, token_manager)
 
     if isinstance(first, list):
@@ -309,7 +337,10 @@ def get_all_from_endpoint(url, token_manager):
         return [first]
     return []
 
-#Normalisierung der Zeitstempel für die Trips Grafana
+
+# ==========================================================
+# Normalisierungs-Helfer fuer Grafana
+# ==========================================================
 def _iso_to_dt(value):
     if not value:
         return None
@@ -344,9 +375,11 @@ def _weekday_mon0(dt):
 def _month_yyyy_mm(dt):
     return f"{dt.year:04d}-{dt.month:02d}" if dt else None
 
-#Datenabruf von den API Endpunkten für die Fahrzeuge und Trips
+
+# ==========================================================
+# Datenabruf
+# ==========================================================
 def fetch_vehicles(base_url, token_manager):
-    # Ruft alle Fahrzeuge über den API-Endpunkt /vehicles ab.
     data = get_all_from_endpoint(f"{base_url}/vehicles", token_manager)
     if not isinstance(data, list):
         raise ValueError("Unerwartetes Format von /vehicles")
@@ -355,22 +388,12 @@ def fetch_vehicles(base_url, token_manager):
 
 def build_vehicle_maps(vehicles):
     vin_to_model, vin_to_vehicle_data = {}, {}
-
-    # Durchläuft alle abgerufenen Fahrzeuge.
     for v in vehicles:
-        # Liest die VIN des aktuellen Fahrzeugs aus.
         vin_key = v.get("vin")
-
-        # Fahrzeuge ohne VIN können nicht eindeutig zugeordnet werden
-        # und werden deshalb übersprungen.
         if not vin_key:
             continue
-
-        # Ordnet der VIN das Fahrzeugmodell zu.
         vin_to_model[vin_key] = v.get("model")
         vd = v.get("vehicleData") if isinstance(v.get("vehicleData"), dict) else {}
-
-        # Speichert zusätzliche Fahrzeugdaten unter der jeweiligen VIN.
         vin_to_vehicle_data[vin_key] = {
             "pairing_state": v.get("pairingState"),
             "fuel_level": vd.get("fuelLevel"),
@@ -382,95 +405,63 @@ def build_vehicle_maps(vehicles):
 
 def fetch_all_trips(base_url, vins, vin_to_model, token_manager):
     """Holt Trips je VIN. Fehlerhafte VINs werden uebersprungen, nicht abgebrochen."""
-
-    
     all_trips = []
-
-
     failed_vins = []
-
-    # Durchläuft alle VINs und zählt den aktuellen Fortschritt mit.
     for i, vin in enumerate(vins, start=1):
         try:
-            # Ruft die Tripdaten für die aktuelle VIN vom API-Endpunkt ab.
             trips_data = get_json(f"{base_url}/trips/vehicle/{vin}", token_manager)
-
         except Exception as exc:
-            # Speichert die fehlgeschlagene VIN zur späteren Auswertung.
             failed_vins.append(vin)
-
-         
             log.error("[%d/%d] VIN=%s uebersprungen wegen Fehler: %s",
                       i, len(vins), vin, exc)
-
-         
             continue
 
-      
         if isinstance(trips_data, dict) and isinstance(trips_data.get("items"), list):
             trips = trips_data["items"]
-
-        
         elif isinstance(trips_data, list):
             trips = trips_data
-
         else:
             trips = [trips_data]
+
         log.info("[%d/%d] VIN=%s | Trips=%d", i, len(vins), vin, len(trips))
 
-        # Verarbeitet jeden Trip der aktuellen VIN.
         for trip in trips:
             if not isinstance(trip, dict):
                 continue
-
-            # Ergänzt die VIN und das zugehörige Fahrzeugmodell im Trip.
             trip["vin"] = vin
             trip["vehicle_model"] = vin_to_model.get(vin)
 
-            # Wandelt Start und Endzeit aus dem ISO-Format
-            # in Python-Datetime-Objekte um.
             start_dt = _iso_to_dt(trip.get("startTime"))
             end_dt = _iso_to_dt(trip.get("endTime"))
-
-            # Wandelt die Datumswerte in Unix-Zeitstempel um.
             start_ts = _to_epoch_seconds(start_dt)
             end_ts = _to_epoch_seconds(end_dt)
 
-            # Speichert die Zeitstempel im Trip.
             trip["start_ts"] = start_ts
             trip["end_ts"] = end_ts
-
-            # Kennzeichnet, ob der Trip eine gültige Endzeit besitzt.
             trip["is_finished"] = 1 if end_ts is not None else 0
-
-            # Erzeugt zusätzliche Zeitfelder für spätere Auswertungen.
             trip["start_day"] = _start_day(start_dt)
             trip["start_weekday"] = _weekday_mon0(start_dt)
             trip["start_month"] = _month_yyyy_mm(start_dt)
 
-            # Berechnet die Fahrtdauer, wenn Start- und Endzeit vorhanden sind.
             if start_ts is not None and end_ts is not None:
-                # Verhindert negative Fahrtdauern.
                 dur = max(0, int(end_ts - start_ts))
-
-                # Speichert die Dauer in Sekunden und Minuten.
                 trip["trip_duration_seconds"] = dur
                 trip["trip_duration_minutes"] = round(dur / 60.0, 2)
-
             else:
-                # Falls eine Zeitangabe fehlt, kann keine Dauer berechnet werden.
                 trip["trip_duration_seconds"] = None
                 trip["trip_duration_minutes"] = None
 
-            # Fügt den vollständig aufbereiteten Trip zur Gesamtliste hinzu.
             all_trips.append(trip)
+
     if failed_vins:
         log.warning("%d/%d VINs konnten nicht abgerufen werden: %s",
                     len(failed_vins), len(vins), ", ".join(failed_vins))
     return all_trips, failed_vins
 
-#Sqlite Speicherung 
 
+# ==========================================================
+# SQLite-Speicherung (WAL + busy-timeout)
+# ==========================================================
 def open_db(db_path):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT)
@@ -652,6 +643,9 @@ def create_views(cur):
     FROM days LEFT JOIN agg ON agg.day=days.day ORDER BY days.day;""")
 
 
+# ==========================================================
+# Hauptablauf
+# ==========================================================
 def main():
     global ENV_PATH, DB_PATH, LOG_PATH
 
