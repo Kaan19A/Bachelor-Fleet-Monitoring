@@ -652,223 +652,87 @@ def create_views(cur):
     FROM days LEFT JOIN agg ON agg.day=days.day ORDER BY days.day;""")
 
 
-# trips tabellen felder nromalisiert
+def main():
+    global ENV_PATH, DB_PATH, LOG_PATH
 
-cur.execute("PRAGMA table_info(trips);")
-trip_columns = [column[1] for column in cur.fetchall()]
-if trip_columns and "id" not in trip_columns:
-    legacy_trips_table = f"legacy_trips_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    cur.execute(f"ALTER TABLE trips RENAME TO {legacy_trips_table};")
-    print(f"Alte trips Tabelle nach {legacy_trips_table} verschoben.")
+    # Lokaler Testmodus: Existiert die konfigurierte (Server-)Env-Datei nicht,
+    # auf eine .env neben dem Skript ausweichen und lokale Test-Pfade nutzen.
+    # Greift NUR lokal (z.B. Windows-Entwicklung); auf dem Server existiert die
+    # echte Env-Datei, daher bleibt dort alles unveraendert.
+    local_test_mode = False
+    if not os.path.exists(ENV_PATH):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        local_env = os.path.join(script_dir, ".env")
+        if os.path.exists(local_env):
+            local_test_mode = True
+            ENV_PATH = local_env
+            if "TRIPMON_DB" not in os.environ:
+                DB_PATH = os.path.join(script_dir, "trips_local.db")
+            if "TRIPMON_LOG" not in os.environ:
+                LOG_PATH = os.path.join(script_dir, "tripmon_local.log")
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS trips (
-    id INTEGER PRIMARY KEY,
-    vin TEXT NOT NULL,
-    vehicle_model TEXT,
-    vehicle_label TEXT,
-    start_time TEXT,
-    end_time TEXT,
-    trip_duration_seconds INTEGER,
-    trip_duration_minutes REAL,
+    _setup_logging()
+    log.info("===== Monitoring-Lauf gestartet =====")
+    if local_test_mode:
+        log.warning("LOKALER TESTMODUS aktiv | Env=%s | DB=%s", ENV_PATH, DB_PATH)
 
-    -- Normalisierung für Grafana
-    start_ts INTEGER,
-    end_ts INTEGER,
-    is_finished INTEGER,
-    start_day TEXT,
-    start_weekday INTEGER,
-    start_month TEXT,
+    load_dotenv(ENV_PATH)
 
-    raw_json TEXT
-);
-""")
+    base_url = os.getenv("BASE_URL", "https://api.cartelsol.mosdon-dev.com")
+    token_url = os.getenv("TOKEN_URL", "https://auth.cartelsol.mosdon-dev.com/oauth2/token")
+    client_id = os.getenv("CLIENT_ID")
+    client_secret = os.getenv("CLIENT_SECRET")
 
-# columns sicherstellen
-for col_def in [
-    "vehicle_model TEXT",
-    "vehicle_label TEXT",
-    "trip_duration_seconds INTEGER",
-    "trip_duration_minutes REAL",
-    "start_ts INTEGER",
-    "end_ts INTEGER",
-    "is_finished INTEGER",
-    "start_day TEXT",
-    "start_weekday INTEGER",
-    "start_month TEXT",
-    "raw_json TEXT",
-]:
+    missing = [n for n, val in {
+        "CLIENT_ID": client_id,
+        "ACCESS_TOKEN": os.getenv("ACCESS_TOKEN"),
+        "REFRESH_TOKEN": os.getenv("REFRESH_TOKEN"),
+    }.items() if not val or val.startswith("HIER_")]
+    if missing:
+        raise RuntimeError(
+            f"Fehlende Pflichtwerte in {ENV_PATH}: {', '.join(missing)}"
+        )
+
+    token_manager = TokenManager(token_url, client_id, client_secret, ENV_PATH,
+                                 base_url=base_url)
+    token_manager.load_tokens()
+
+    # 1) Fahrzeuge holen (paginiert)
+    vehicles = fetch_vehicles(base_url, token_manager)
+    vins = list(dict.fromkeys(v["vin"] for v in vehicles if "vin" in v))
+    if not vins:
+        raise ValueError("Keine VINs im /vehicles-Response gefunden")
+    log.info("Fahrzeuge: %d | VINs: %d", len(vehicles), len(vins))
+
+    vin_to_model, _ = build_vehicle_maps(vehicles)
+
+    # 2) Trips holen (fehlertolerant pro VIN)
+    all_trips, failed_vins = fetch_all_trips(base_url, vins, vin_to_model, token_manager)
+    log.info("Gesamt Trips ueber alle Fahrzeuge: %d", len(all_trips))
+
+    # 3) Speichern (WAL, eine Transaktion)
+    conn = open_db(DB_PATH)
     try:
-        cur.execute(f"ALTER TABLE trips ADD COLUMN {col_def};")
-    except sqlite3.OperationalError:
-        pass
+        cur = conn.cursor()
+        v_count = save_vehicles(cur, vehicles)
+        t_count = save_trips(cur, all_trips, vin_to_model)
+        create_views(cur)
+        conn.commit()
+    finally:
+        conn.close()
 
-cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_vin ON trips(vin);")
-cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_start_ts ON trips(start_ts);")
-cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_finished ON trips(is_finished);")
-cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_vehicle_model ON trips(vehicle_model);")
-cur.execute("CREATE INDEX IF NOT EXISTS idx_trips_start_day ON trips(start_day);")
+    log.info("SQLite aktualisiert: %s", DB_PATH)
+    log.info("Vehicles gespeichert: %d | Trips gespeichert: %d", v_count, t_count)
+    if failed_vins:
+        log.warning("Lauf mit %d uebersprungenen VINs beendet", len(failed_vins))
+    log.info("===== Monitoring-Lauf erfolgreich beendet =====")
+    return 0
 
-inserted = 0
-for t in all_trips:
-    if not isinstance(t, dict):
-        continue
 
-    trip_id = t.get("id")
-    vin = t.get("vin")
-
-    start_time = t.get("startTime")
-
-    #  Tripdaten mit Fahrzeugmodell und Zeitkennzahlen speichern
-
-    end_time = t.get("endTime") or "trip not finished"
-
-    vehicle_model = t.get("vehicle_model") or vin_to_model.get(vin)
-    vehicle_label = f"{vehicle_model} ({vin})" if vehicle_model else vin
-
-    start_ts = t.get("start_ts")
-    end_ts = t.get("end_ts")
-    is_finished = t.get("is_finished", 0)
-
-    start_day = t.get("start_day")
-    start_weekday = t.get("start_weekday")
-    start_month = t.get("start_month")
-
-    trip_duration_seconds = t.get("trip_duration_seconds")
-    trip_duration_minutes = t.get("trip_duration_minutes")
-
-    if trip_id is None or vin is None:
-        continue
-
-    cur.execute("""
-    INSERT INTO trips (
-        id, vin, vehicle_model, vehicle_label,
-        start_time, end_time,
-        trip_duration_seconds, trip_duration_minutes,
-        start_ts, end_ts, is_finished,
-        start_day, start_weekday, start_month,
-        raw_json
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-        vin = excluded.vin,
-        vehicle_model = excluded.vehicle_model,
-        vehicle_label = excluded.vehicle_label,
-        start_time = excluded.start_time,
-        end_time = excluded.end_time,
-        trip_duration_seconds = excluded.trip_duration_seconds,
-        trip_duration_minutes = excluded.trip_duration_minutes,
-        start_ts = excluded.start_ts,
-        end_ts = excluded.end_ts,
-        is_finished = excluded.is_finished,
-        start_day = excluded.start_day,
-        start_weekday = excluded.start_weekday,
-        start_month = excluded.start_month,
-        raw_json = excluded.raw_json;
-    """, (
-        trip_id, vin, vehicle_model, vehicle_label,
-        start_time, end_time,
-        trip_duration_seconds, trip_duration_minutes,
-        start_ts, end_ts, is_finished,
-        start_day, start_weekday, start_month,
-        json.dumps(t, ensure_ascii=False)
-    ))
-    inserted += 1
-
-#Grafana Trip Views 
-cur.execute("DROP VIEW IF EXISTS v_trips_monitoring;")
-cur.execute("DROP VIEW IF EXISTS v_unfinished_trips;")
-cur.execute("DROP VIEW IF EXISTS v_vehicle_activity;")
-cur.execute("DROP VIEW IF EXISTS v_trips_per_day_last_31d;")
-
-cur.execute("""
-    CREATE VIEW v_trips_monitoring AS
-    SELECT
-    (start_ts * 1000) AS time,
-    vin,
-    vehicle_model,
-    vehicle_label,
-    is_finished,
-    trip_duration_minutes,
-    start_day,
-    start_weekday,
-    start_month
-    FROM trips
-    WHERE start_ts IS NOT NULL;
-    """)
-
-#unfinished Trips (Table laufzeit in min)
-cur.execute("""
-    CREATE VIEW v_unfinished_trips AS
-    SELECT
-    (start_ts * 1000) AS time,
-    vin,
-    vehicle_model,
-    vehicle_label,
-    start_time,
-    end_time,
-    (strftime('%s','now') - start_ts) / 60.0 AS minutes_running
-    FROM trips
-    WHERE is_finished = 0
-    AND start_ts IS NOT NULL
-    ORDER BY start_ts DESC;
-    """)
-
-# verhicle active/inactive view letze 30 min
-
-cur.execute("""
-    CREATE VIEW v_vehicle_activity AS
-    SELECT
-    pairing_state,
-    CASE
-    WHEN last_communication_ts IS NOT NULL
-    AND last_communication_ts >= (strftime('%s','now') - 30*60)
-    THEN 'aktiv'
-    ELSE 'inaktiv'
-    END AS aktiv_status,
-    COUNT(*) AS fahrzeuge
-    FROM vehicles
-    GROUP BY pairing_state, aktiv_status
-    ORDER BY pairing_state, aktiv_status;
-    """) 
-
-# trips pro tag letzte (31 Tage)
-
-cur.execute("""
-CREATE VIEW v_trips_per_day_last_31d AS
-WITH RECURSIVE days(day) AS (
-  SELECT date('now','-30 day')
-  UNION ALL
-  SELECT date(day,'+1 day') FROM days WHERE day < date('now')
-),
-agg AS (
-  SELECT
-    start_day AS day,
-    COUNT(*) AS trips,
-    SUM(CASE WHEN is_finished=0 THEN 1 ELSE 0 END) AS unfinished_trips
-  FROM trips
-  WHERE start_day >= date('now','-30 day')
-  GROUP BY start_day
-)
-SELECT
-  (strftime('%s', days.day) * 1000) AS time,
-  days.day,
-  COALESCE(agg.trips, 0) AS trips,
-  COALESCE(agg.unfinished_trips, 0) AS unfinished_trips
-FROM days
-LEFT JOIN agg ON agg.day = days.day
-ORDER BY days.day;
-""")
-
-conn.commit()
-conn.close()
-
-print("\n==============================")
-print(f" SQLite DB aktualisiert: {db_path}")
-print(f" Trips gespeichert/aktualisiert: {inserted}")
-print(f" Vehicles gespeichert/aktualisiert: {len(vehicles)}")
-print(" Views erstellt:")
-print("  - v_trips_monitoring")
-print("  - v_unfinished_trips")
-print("  - v_vehicle_activity")
-print("  - v_trips_per_day_last_31d")
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        logging.getLogger("tripdaten-mon").critical(
+            "ABBRUCH des Monitoring-Laufs: %s", exc, exc_info=True)
+        sys.exit(1)
