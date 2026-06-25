@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""Automatisiertes Monitoring der Fahrzeug-Tripdaten.
-
-Lauf-Modell (Firmenserver):
-  - Cronjob laeuft als User 'grafana'
-  - Env-Datei:  /etc/tripdaten-mon/tripdaten-mon.env   (Verzeichnis gehoert grafana, damit
-                das atomare .tmp-Schreiben funktioniert)
-  - SQLite-DB:  /var/lib/grafana/sqlite/trips.db        (gehoert grafana -> Grafana liest WAL sauber)
-  - Logdatei:   /var/log/tripdaten-mon/tripdaten-mon.log
-
-Designziel: dauerhaft stabil. Ein einzelner fehlerhafter API-Request darf den
-Gesamtlauf NICHT stoppen; transiente Fehler werden mit Retry abgefangen; rotierte
-Refresh-Tokens werden sofort sicher persistiert.
-"""
-
 import json
 import logging
 import os
@@ -26,7 +11,7 @@ import sqlite3
 
 try:
     from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - klare Fehlermeldung statt kryptischem Traceback
+except ImportError: 
     sys.stderr.write(
         "FEHLER: python-dotenv ist nicht installiert. "
         "Bitte ausfuehren: pip3 install python-dotenv requests\n"
@@ -34,9 +19,9 @@ except ImportError:  # pragma: no cover - klare Fehlermeldung statt kryptischem 
     raise
 
 
-# ==========================================================
-# Konfiguration (alles ueber Env-Variablen ueberschreibbar)
-# ==========================================================
+
+# Env-Variablen ueberschreibbar
+
 ENV_PATH = os.getenv("TRIPMON_ENV", "/etc/tripdaten-mon/tripdaten-mon.env")
 DB_PATH = os.getenv("TRIPMON_DB", "/var/lib/grafana/sqlite/trips.db")
 LOG_PATH = os.getenv("TRIPMON_LOG", "/var/log/tripdaten-mon/tripdaten-mon.log")
@@ -47,9 +32,9 @@ HTTP_BACKOFF = 5           # Sekunden, multipliziert mit Versuchsnummer
 SQLITE_TIMEOUT = 30        # Sekunden busy-timeout beim Verbinden
 
 
-# ==========================================================
-# Logging (Datei + stderr, mit Zeitstempel und Level)
-# ==========================================================
+
+# Logging Datei mit Zeitstempel
+
 def _setup_logging():
     handlers = [logging.StreamHandler(sys.stderr)]
     try:
@@ -67,9 +52,9 @@ def _setup_logging():
 log = logging.getLogger("tripdaten-mon")
 
 
-# ==========================================================
-# Atomare Env-Datei schreiben (tmp + fsync + replace + chmod)
-# ==========================================================
+
+# Atomare Env-Datei schreiben 
+
 def save_dotenv_values(path, updates):
     """Schreibt Schluessel/Werte atomar zurueck in die Env-Datei.
 
@@ -116,9 +101,8 @@ def save_dotenv_values(path, updates):
         os.environ[key] = value
 
 
-# ==========================================================
 # Token-Verwaltung
-# ==========================================================
+
 class TokenRefreshError(RuntimeError):
     pass
 
@@ -246,14 +230,13 @@ class TokenManager:
                 self.refresh_token = new_refresh_token
                 log.info("Neuer (rotierter) Refresh-Token uebernommen")
 
-            # Sofort persistieren -> bei Rotation darf hier nichts verloren gehen
+            # Sofort persistieren  bei Rotation 
             self.save_tokens()
             log.info("Access-Token erneuert")
 
 
-# ==========================================================
-# HTTP mit Retry (transiente Fehler) + zentralem 401-Handling
-# ==========================================================
+# HTTP error Handling
+
 def _is_transient_status(status):
     return status in (429, 500, 502, 503, 504)
 
@@ -338,9 +321,8 @@ def get_all_from_endpoint(url, token_manager):
     return []
 
 
-# ==========================================================
 # Normalisierungs-Helfer fuer Grafana
-# ==========================================================
+
 def _iso_to_dt(value):
     if not value:
         return None
@@ -376,9 +358,9 @@ def _month_yyyy_mm(dt):
     return f"{dt.year:04d}-{dt.month:02d}" if dt else None
 
 
-# ==========================================================
+
 # Datenabruf
-# ==========================================================
+
 def fetch_vehicles(base_url, token_manager):
     data = get_all_from_endpoint(f"{base_url}/vehicles", token_manager)
     if not isinstance(data, list):
@@ -459,9 +441,76 @@ def fetch_all_trips(base_url, vins, vin_to_model, token_manager):
     return all_trips, failed_vins
 
 
-# ==========================================================
-# SQLite-Speicherung (WAL + busy-timeout)
-# ==========================================================
+# Json datei: baut je VIN ein angereichertes vehicle_info-Objekt 
+def _build_vehicle_info_map(vehicles):
+    info_map, flat_map = {}, {}
+    for v in vehicles:
+        vin_key = v.get("vin")
+        if not vin_key:
+            continue
+        vd = v.get("vehicleData") if isinstance(v.get("vehicleData"), dict) else {}
+        current_fleet = v.get("currentFleet")
+        if isinstance(current_fleet, dict):
+            current_fleet = current_fleet.get("name")
+        info_map[vin_key] = {
+            "vin": vin_key,
+            "model": v.get("model"),
+            "pairing_state": v.get("pairingState"),
+            "mosdon_id": v.get("mosdonId"),
+            "license_plate": v.get("licensePlate"),
+            "vehicle_data": vd,
+            "current_fleet": current_fleet,
+            "current_technicians": v.get("currentTechnicians"),
+            "diagnosis": v.get("diagnosis"),
+            "raw_vehicle": v,
+        }
+        flat_map[vin_key] = {
+            "pairing_state": v.get("pairingState"),
+            "fuel_level": vd.get("fuelLevel"),
+            "odometer": vd.get("odometer"),
+            "last_communication": vd.get("lastCommunication"),
+        }
+    return info_map, flat_map
+
+
+def export_trips_json(path, all_trips, vehicles, vin_to_model):
+    """Schreibt einen angereicherten JSON-Export der Trips
+    """
+    info_map, flat_map = _build_vehicle_info_map(vehicles)
+    export = []
+    for t in all_trips:
+        vin = t.get("vin")
+        flat = flat_map.get(vin, {})
+        export.append({
+            "id": t.get("id"),
+            "vin": vin,
+            "startTime": t.get("startTime"),
+            "endTime": t.get("endTime"),
+            "vehicle_model": t.get("vehicle_model") or vin_to_model.get(vin),
+            "pairing_state": flat.get("pairing_state"),
+            "fuel_level": flat.get("fuel_level"),
+            "odometer": flat.get("odometer"),
+            "last_communication": flat.get("last_communication"),
+            "vehicle_info": info_map.get(vin),
+            "start_ts": t.get("start_ts"),
+            "end_ts": t.get("end_ts"),
+            "is_finished": t.get("is_finished"),
+            "start_day": t.get("start_day"),
+            "start_weekday": t.get("start_weekday"),
+            "start_month": t.get("start_month"),
+            "trip_duration_seconds": t.get("trip_duration_seconds"),
+            "trip_duration_minutes": t.get("trip_duration_minutes"),
+        })
+
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(export, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+    return len(export)
+
+
+# SQLite-Speicherung 
+
 def open_db(db_path):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT)
@@ -643,23 +692,20 @@ def create_views(cur):
     FROM days LEFT JOIN agg ON agg.day=days.day ORDER BY days.day;""")
 
 
-# ==========================================================
 # Hauptablauf
-# ==========================================================
+
 def main():
     global ENV_PATH, DB_PATH, LOG_PATH
 
-    # Lokaler Testmodus: Existiert die konfigurierte (Server-)Env-Datei nicht,
-    # auf eine .env neben dem Skript ausweichen und lokale Test-Pfade nutzen.
-    # Greift NUR lokal (z.B. Windows-Entwicklung); auf dem Server existiert die
-    # echte Env-Datei, daher bleibt dort alles unveraendert.
     local_test_mode = False
+    json_export_path = None
     if not os.path.exists(ENV_PATH):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         local_env = os.path.join(script_dir, ".env")
         if os.path.exists(local_env):
             local_test_mode = True
             ENV_PATH = local_env
+            json_export_path = os.path.join(script_dir, "trips_all.json")
             if "TRIPMON_DB" not in os.environ:
                 DB_PATH = os.path.join(script_dir, "trips_local.db")
             if "TRIPMON_LOG" not in os.environ:
@@ -691,7 +737,7 @@ def main():
                                  base_url=base_url)
     token_manager.load_tokens()
 
-    # 1) Fahrzeuge holen (paginiert)
+    # 1) Fahrzeuge holen
     vehicles = fetch_vehicles(base_url, token_manager)
     vins = list(dict.fromkeys(v["vin"] for v in vehicles if "vin" in v))
     if not vins:
@@ -700,11 +746,16 @@ def main():
 
     vin_to_model, _ = build_vehicle_maps(vehicles)
 
-    # 2) Trips holen (fehlertolerant pro VIN)
+    # 2) Trips holen 
     all_trips, failed_vins = fetch_all_trips(base_url, vins, vin_to_model, token_manager)
     log.info("Gesamt Trips ueber alle Fahrzeuge: %d", len(all_trips))
 
-    # 3) Speichern (WAL, eine Transaktion)
+    # 2b) NUR lokal: JSON-Export zum Reinschauen in VS Code (auf dem Server inaktiv)
+    if local_test_mode and json_export_path:
+        n = export_trips_json(json_export_path, all_trips, vehicles, vin_to_model)
+        log.info("LOKAL: JSON-Export geschrieben: %d Trips -> %s", n, json_export_path)
+
+    # 3) Speichern 
     conn = open_db(DB_PATH)
     try:
         cur = conn.cursor()
