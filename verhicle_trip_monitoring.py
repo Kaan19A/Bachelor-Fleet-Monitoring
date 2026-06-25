@@ -28,6 +28,26 @@ HTTP_RETRIES = 3           # Versuche bei transienten Fehlern (Timeout/Connectio
 HTTP_BACKOFF = 5           # Sekunden, multipliziert mit Versuchsnummer
 SQLITE_TIMEOUT = 30        # Sekunden busy-timeout beim Verbinden
 
+
+#Logging Datei für das Monitoring und terminal ausgabe
+
+def _setup_logging():
+    handlers = [logging.StreamHandler(sys.stderr)]
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        handlers.append(logging.FileHandler(LOG_PATH, encoding="utf-8"))
+    except OSError as exc:
+        sys.stderr.write(f"WARN: Logdatei {LOG_PATH} nicht beschreibbar: {exc}\n")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        handlers=handlers,
+    )
+
+
+log = logging.getLogger("tripdaten-mon")
+
+
 def _headers():
     if not ACCESS_TOKEN:
         raise ValueError("Bitte CARTELSOL_BEARER_TOKEN in der .env Datei eintragen.")
