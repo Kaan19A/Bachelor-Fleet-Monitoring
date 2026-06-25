@@ -2,12 +2,21 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
+import logging
 from datetime import datetime, timezone
 
 import requests
 
-BASE_URL = "https://api.cartelsol.mosdon-dev.com"
-TOKEN_URL = "https://auth.cartelsol.mosdon-dev.com/oauth2/token"
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - klare Fehlermeldung statt kryptischem Traceback
+    sys.stderr.write(
+        "FEHLER: python-dotenv ist nicht installiert. "
+        "Bitte ausfuehren: pip3 install python-dotenv requests\n"
+    )
+    raise
+
 
 def load_env_file(path=".env"):
     if not os.path.exists(path):
