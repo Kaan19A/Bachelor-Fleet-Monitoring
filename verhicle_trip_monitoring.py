@@ -17,26 +17,16 @@ except ImportError:  # pragma: no cover - klare Fehlermeldung statt kryptischem 
     )
     raise
 
+#Env variablen sollen überschreibar sein, daher zuerst laden und dann überschreiben
 
-def load_env_file(path=".env"):
-    if not os.path.exists(path):
-        return
+ENV_PATH = os.getenv("TRIPMON_ENV", "/etc/tripdaten-mon/tripdaten-mon.env")
+DB_PATH = os.getenv("TRIPMON_DB", "/var/lib/grafana/sqlite/trips.db")
+LOG_PATH = os.getenv("TRIPMON_LOG", "/var/log/tripdaten-mon/tripdaten-mon.log")
 
-    with open(path, encoding="utf-8") as env_file:
-        for line in env_file:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-load_env_file()
-
-ACCESS_TOKEN = os.getenv("CARTELSOL_BEARER_TOKEN")
-REFRESH_TOKEN = os.getenv("CARTELSOL_REFRESH_TOKEN")
-CLIENT_ID = os.getenv("CLIENT_ID")
-db_path = os.getenv("SQLITE_DB_PATH", "fleet_monitoring.db")
+HTTP_TIMEOUT = 30          # Sekunden pro Request
+HTTP_RETRIES = 3           # Versuche bei transienten Fehlern (Timeout/Connection/5xx)
+HTTP_BACKOFF = 5           # Sekunden, multipliziert mit Versuchsnummer
+SQLITE_TIMEOUT = 30        # Sekunden busy-timeout beim Verbinden
 
 def _headers():
     if not ACCESS_TOKEN:
