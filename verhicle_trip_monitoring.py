@@ -47,7 +47,49 @@ def _setup_logging():
 
 log = logging.getLogger("tripdaten-mon")
 
+# Speicherung aktualisierter Token in der Env-Datei hinzufügen
+def save_dotenv_values(path, updates):
 
+lines = []
+    seen = set()
+
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in updates:
+            new_lines.append(f"{key}={updates[key]}\n")
+            seen.add(key)
+        else:
+            new_lines.append(line)
+
+    for key, value in updates.items():
+        if key not in seen:
+            new_lines.append(f"{key}={value}\n")
+
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(tmp_path, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+    for key, value in updates.items():
+        os.environ[key] = value
+
+        
 def _headers():
     if not ACCESS_TOKEN:
         raise ValueError("Bitte CARTELSOL_BEARER_TOKEN in der .env Datei eintragen.")
