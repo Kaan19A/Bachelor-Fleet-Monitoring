@@ -225,7 +225,7 @@ class TokenManager:
             log.info("Access-Token erneuert")
 
 
-#Normaliserung Zeitangaben: ISO-8601 -> datetime UTC, epoch seconds, Starttag, Wochentag, Monat
+#Normalisierung der Zeitstempel für die Trips Grafana
 def _iso_to_dt(value):
     if not value:
         return None
@@ -260,60 +260,132 @@ def _weekday_mon0(dt):
 def _month_yyyy_mm(dt):
     return f"{dt.year:04d}-{dt.month:02d}" if dt else None
 
+#Datenabruf von den API Endpunkten für die Fahrzeuge und Trips
+def fetch_vehicles(base_url, token_manager):
+    # Ruft alle Fahrzeuge über den API-Endpunkt /vehicles ab.
+    data = get_all_from_endpoint(f"{base_url}/vehicles", token_manager)
+    if not isinstance(data, list):
+        raise ValueError("Unerwartetes Format von /vehicles")
+    return data
 
-# Alle Fahrzeuge holen 
 
-vehicles_data = get_json(f"{BASE_URL}/vehicles")
+def build_vehicle_maps(vehicles):
+    vin_to_model, vin_to_vehicle_data = {}, {}
 
-if isinstance(vehicles_data, dict) and isinstance(vehicles_data.get("items"), list):
-    vehicles = vehicles_data["items"]
-elif isinstance(vehicles_data, list):
-    vehicles = vehicles_data
-else:
-    raise ValueError("Unerwartetes Format von /vehicles")
+    # Durchläuft alle abgerufenen Fahrzeuge.
+    for v in vehicles:
+        # Liest die VIN des aktuellen Fahrzeugs aus.
+        vin_key = v.get("vin")
 
-#xtraktion der Vins
+        # Fahrzeuge ohne VIN können nicht eindeutig zugeordnet werden
+        # und werden deshalb übersprungen.
+        if not vin_key:
+            continue
 
-vins = [v["vin"] for v in vehicles if "vin" in v]
-vins = list(dict.fromkeys(vins))
+        # Ordnet der VIN das Fahrzeugmodell zu.
+        vin_to_model[vin_key] = v.get("model")
+        vd = v.get("vehicleData") if isinstance(v.get("vehicleData"), dict) else {}
 
-if not vins:
-    raise ValueError("Keine VINs im Vehicles-Response gefunden")
-
-print(f"Fahrzeuge: {len(vehicles)} | VINs: {len(vins)}")
-
-#Fahrzeugdaten nach Vin zuordnen
-
-vin_to_model = {}
-vin_to_vehicle_data = {}
-vin_to_vehicle_info = {}
-
-for v in vehicles:
-    vin_key = v.get("vin")
-    model = v.get("model")  
-    if vin_key:
-        vin_to_model[vin_key] = model
-
-        vehicle_data = v.get("vehicleData") if isinstance(v.get("vehicleData"), dict) else {}
+        # Speichert zusätzliche Fahrzeugdaten unter der jeweiligen VIN.
         vin_to_vehicle_data[vin_key] = {
             "pairing_state": v.get("pairingState"),
-            "fuel_level": vehicle_data.get("fuelLevel"),
-            "odometer": vehicle_data.get("odometer"),
-            "last_communication": vehicle_data.get("lastCommunication")
+            "fuel_level": vd.get("fuelLevel"),
+            "odometer": vd.get("odometer"),
+            "last_communication": vd.get("lastCommunication"),
         }
+    return vin_to_model, vin_to_vehicle_data
 
-        vin_to_vehicle_info[vin_key] = {
-            "vin": v.get("vin"),
-            "model": v.get("model"),
-            "pairing_state": v.get("pairingState"),
-            "mosdon_id": v.get("mosdonId"),
-            "license_plate": v.get("licensePlate"),
-            "vehicle_data": vehicle_data,
-            "current_fleet": v.get("currentFleet"),
-            "current_technicians": v.get("currentTechnicians"),
-            "diagnosis": v.get("diagnosis"),
-            "raw_vehicle": v
-        }
+
+def fetch_all_trips(base_url, vins, vin_to_model, token_manager):
+    """Holt Trips je VIN. Fehlerhafte VINs werden uebersprungen, nicht abgebrochen."""
+
+    
+    all_trips = []
+
+
+    failed_vins = []
+
+    # Durchläuft alle VINs und zählt den aktuellen Fortschritt mit.
+    for i, vin in enumerate(vins, start=1):
+        try:
+            # Ruft die Tripdaten für die aktuelle VIN vom API-Endpunkt ab.
+            trips_data = get_json(f"{base_url}/trips/vehicle/{vin}", token_manager)
+
+        except Exception as exc:
+            # Speichert die fehlgeschlagene VIN zur späteren Auswertung.
+            failed_vins.append(vin)
+
+         
+            log.error("[%d/%d] VIN=%s uebersprungen wegen Fehler: %s",
+                      i, len(vins), vin, exc)
+
+         
+            continue
+
+      
+        if isinstance(trips_data, dict) and isinstance(trips_data.get("items"), list):
+            trips = trips_data["items"]
+
+        
+        elif isinstance(trips_data, list):
+            trips = trips_data
+
+        else:
+            trips = [trips_data]
+        log.info("[%d/%d] VIN=%s | Trips=%d", i, len(vins), vin, len(trips))
+
+        # Verarbeitet jeden Trip der aktuellen VIN.
+        for trip in trips:
+            if not isinstance(trip, dict):
+                continue
+
+            # Ergänzt die VIN und das zugehörige Fahrzeugmodell im Trip.
+            trip["vin"] = vin
+            trip["vehicle_model"] = vin_to_model.get(vin)
+
+            # Wandelt Start und Endzeit aus dem ISO-Format
+            # in Python-Datetime-Objekte um.
+            start_dt = _iso_to_dt(trip.get("startTime"))
+            end_dt = _iso_to_dt(trip.get("endTime"))
+
+            # Wandelt die Datumswerte in Unix-Zeitstempel um.
+            start_ts = _to_epoch_seconds(start_dt)
+            end_ts = _to_epoch_seconds(end_dt)
+
+            # Speichert die Zeitstempel im Trip.
+            trip["start_ts"] = start_ts
+            trip["end_ts"] = end_ts
+
+            # Kennzeichnet, ob der Trip eine gültige Endzeit besitzt.
+            trip["is_finished"] = 1 if end_ts is not None else 0
+
+            # Erzeugt zusätzliche Zeitfelder für spätere Auswertungen.
+            trip["start_day"] = _start_day(start_dt)
+            trip["start_weekday"] = _weekday_mon0(start_dt)
+            trip["start_month"] = _month_yyyy_mm(start_dt)
+
+            # Berechnet die Fahrtdauer, wenn Start- und Endzeit vorhanden sind.
+            if start_ts is not None and end_ts is not None:
+                # Verhindert negative Fahrtdauern.
+                dur = max(0, int(end_ts - start_ts))
+
+                # Speichert die Dauer in Sekunden und Minuten.
+                trip["trip_duration_seconds"] = dur
+                trip["trip_duration_minutes"] = round(dur / 60.0, 2)
+
+            else:
+                # Falls eine Zeitangabe fehlt, kann keine Dauer berechnet werden.
+                trip["trip_duration_seconds"] = None
+                trip["trip_duration_minutes"] = None
+
+            # Fügt den vollständig aufbereiteten Trip zur Gesamtliste hinzu.
+            all_trips.append(trip)
+    if failed_vins:
+        log.warning("%d/%d VINs konnten nicht abgerufen werden: %s",
+                    len(failed_vins), len(vins), ", ".join(failed_vins))
+    return all_trips, failed_vins
+
+
 
 # Trips für jede Vin holen
 
