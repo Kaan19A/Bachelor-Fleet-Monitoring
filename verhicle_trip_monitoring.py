@@ -227,7 +227,6 @@ class TokenManager:
 
 #Normaliserung Zeitangaben: ISO-8601 -> datetime UTC, epoch seconds, Starttag, Wochentag, Monat
 def _iso_to_dt(value):
-    """ISO-8601 -> datetime UTC. Akzeptiert '...Z'. 'trip not finished' => None."""
     if not value:
         return None
     if isinstance(value, str) and value.strip().lower() == "trip not finished":
@@ -245,17 +244,22 @@ def _iso_to_dt(value):
     except Exception:
         return None
 
+
 def _to_epoch_seconds(dt):
     return int(dt.timestamp()) if dt else None
+
 
 def _start_day(dt):
     return dt.date().isoformat() if dt else None
 
+
 def _weekday_mon0(dt):
-    return dt.weekday() if dt else None  # Monday=0..Sunday=6
+    return dt.weekday() if dt else None
+
 
 def _month_yyyy_mm(dt):
     return f"{dt.year:04d}-{dt.month:02d}" if dt else None
+
 
 # Alle Fahrzeuge holen 
 
