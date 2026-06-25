@@ -224,6 +224,90 @@ class TokenManager:
             self.save_tokens()
             log.info("Access-Token erneuert")
 
+#Http fehler Handling für die API requests
+
+def _is_transient_status(status):
+    return status in (429, 500, 502, 503, 504)
+
+
+def get_json(url, token_manager, _already_refreshed=False):
+    last_exc = None
+    for attempt in range(1, HTTP_RETRIES + 1):
+        try:
+            headers = {
+                "Authorization": f"Bearer {token_manager.get_access_token()}",
+                "Accept": "application/json",
+            }
+            response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+            log.info("GET %s -> %s (Versuch %d)", url, response.status_code, attempt)
+
+            if response.status_code == 401 and not _already_refreshed:
+                log.warning("401 Unauthorized -> Access-Token wird einmal erneuert")
+                token_manager.refresh_access_token()
+                return get_json(url, token_manager, _already_refreshed=True)
+
+            if _is_transient_status(response.status_code):
+                last_exc = RuntimeError(f"HTTP {response.status_code} bei {url}")
+                raise last_exc
+
+            response.raise_for_status()
+            return response.json()
+
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.SSLError) as exc:
+            last_exc = exc
+            log.warning("Netzwerkfehler bei %s (Versuch %d/%d): %s",
+                        url, attempt, HTTP_RETRIES, exc)
+        except RuntimeError as exc:  # transienter HTTP-Status
+            last_exc = exc
+            log.warning("Transienter Fehler bei %s (Versuch %d/%d): %s",
+                        url, attempt, HTTP_RETRIES, exc)
+
+        if attempt < HTTP_RETRIES:
+            time.sleep(HTTP_BACKOFF * attempt)
+
+    raise RuntimeError(f"Endgueltig fehlgeschlagen nach {HTTP_RETRIES} Versuchen: {url}") from last_exc
+
+
+def get_all_from_endpoint(url, token_manager):
+    """Holt alle Items eines  Endpoints. """
+                       
+    Unterstuetzt: direkte Liste, {"items":[...]}, 'next'-Link, limit/offset.
+    
+    first = get_json(url, token_manager)
+
+    if isinstance(first, list):
+        return first
+
+    if isinstance(first, dict) and isinstance(first.get("items"), list):
+        items = list(first["items"])
+        next_url = first.get("next") or (first.get("links") or {}).get("next")
+        while next_url:
+            page = get_json(next_url, token_manager)
+            if isinstance(page, dict) and isinstance(page.get("items"), list):
+                items.extend(page["items"])
+                next_url = page.get("next") or (page.get("links") or {}).get("next")
+            else:
+                break
+        # Falls keine next-Links: per limit/offset weiterblaettern
+        if not (first.get("next") or (first.get("links") or {}).get("next")):
+            limit, offset = 200, len(items)
+            while len(first["items"]) >= 200:  # nur wenn erste Seite "voll" war
+                paged = get_json(f"{url}?limit={limit}&offset={offset}", token_manager)
+                page_items = paged.get("items") if isinstance(paged, dict) else (
+                    paged if isinstance(paged, list) else [])
+                if not page_items:
+                    break
+                items.extend(page_items)
+                if len(page_items) < limit:
+                    break
+                offset += limit
+        return items
+
+    if isinstance(first, dict):
+        return [first]
+    return []
 
 #Normalisierung der Zeitstempel für die Trips Grafana
 def _iso_to_dt(value):
