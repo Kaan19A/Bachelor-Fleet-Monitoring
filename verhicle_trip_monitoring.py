@@ -647,16 +647,69 @@ def save_trips(cur, all_trips, vin_to_model):
 
 
 def create_views(cur):
-    cur.execute("DROP VIEW IF EXISTS v_trips_monitoring;")
-    cur.execute("DROP VIEW IF EXISTS v_unfinished_trips;")
-    cur.execute("DROP VIEW IF EXISTS v_vehicle_activity;")
-    cur.execute("DROP VIEW IF EXISTS v_trips_per_day_last_31d;")
+    # Basis-Views
+    for v in ("v_trips_monitoring", "v_unfinished_trips", "v_vehicle_activity",
+              "v_trips_per_day_last_31d"):
+        cur.execute(f"DROP VIEW IF EXISTS {v};")
+    # Analyse-Views (haengen an v_trips_monitoring)
+    for v in ("v_anomaly_timeseries", "v_ghost_trips", "v_hardware_comparison",
+              "v_long_trips", "v_negative_values", "v_teleportation_events",
+              "v_timeout_trips", "v_trip_distance_timeseries",
+              "v_trip_duration_timeseries", "v_trips_last_31_days"):
+        cur.execute(f"DROP VIEW IF EXISTS {v};")
 
+    # Reiches v_trips_monitoring: Anomalie-Flags + Kategorie direkt aus trips berechnet.
+    # WICHTIG: echte Dauer = (end_ts - start_ts), NICHT trip_duration_seconds
+    # (das ist auf >=0 gekappt und wuerde negative Trips verbergen).
+    # Regeln 1:1 aus der Legacy-Pipeline rekonstruiert (validiert: 0 Abweichungen):
+    #   negativ:   dur < 0      -> 'negative_source_value'
+    #   lang:      dur > 7200   -> 'long_trip_over_2h' (2h)
+    #   unfinished: is_finished=0 -> 'unfinished_trip'
+    #   is_anomaly = OR aller Flags ; distance_km/hardware_group lagen nie vor (NULL).
     cur.execute("""
     CREATE VIEW v_trips_monitoring AS
-    SELECT (start_ts*1000) AS time, vin, vehicle_model, vehicle_label, is_finished,
-           trip_duration_minutes, start_day, start_weekday, start_month
-    FROM trips WHERE start_ts IS NOT NULL;""")
+    SELECT
+        (start_ts*1000) AS time,
+        id AS trip_id,
+        vin,
+        vehicle_model,
+        vehicle_label,
+        start_time,
+        end_time,
+        is_finished,
+        trip_duration_minutes,
+        dur AS duration_seconds,
+        NULL AS distance_km,
+        NULL AS hardware_group,
+        start_day,
+        start_weekday,
+        start_month,
+        CASE WHEN dur < 0    THEN 1 ELSE 0 END AS is_negative_value,
+        CASE WHEN dur = 0    THEN 1 ELSE 0 END AS is_zero_value,
+        CASE WHEN dur > 7200 THEN 1 ELSE 0 END AS is_long_trip,
+        CASE WHEN is_finished = 0 THEN 1 ELSE 0 END AS is_unfinished_trip,
+        0 AS is_timeout_trip,
+        0 AS is_teleportation,
+        0 AS is_ghost_trip,
+        CASE WHEN is_finished = 0 OR dur < 0 OR dur = 0 OR dur > 7200
+             THEN 1 ELSE 0 END AS is_anomaly,
+        CASE
+            WHEN is_finished = 0 THEN 'unfinished_trip'
+            WHEN dur > 7200      THEN 'long_trip_over_2h'
+            WHEN dur < 0         THEN 'negative_source_value'
+            ELSE NULL
+        END AS anomaly_reason,
+        CASE
+            WHEN is_finished = 0 THEN 'unfinished'
+            WHEN dur > 7200      THEN 'long'
+            WHEN dur < 0         THEN 'negative_value'
+            ELSE 'normal'
+        END AS trip_category
+    FROM (
+        SELECT *, (end_ts - start_ts) AS dur
+        FROM trips
+        WHERE start_ts IS NOT NULL
+    );""")
 
     cur.execute("""
     CREATE VIEW v_unfinished_trips AS
@@ -690,6 +743,99 @@ def create_views(cur):
            COALESCE(agg.trips,0) AS trips,
            COALESCE(agg.unfinished_trips,0) AS unfinished_trips
     FROM days LEFT JOIN agg ON agg.day=days.day ORDER BY days.day;""")
+
+    # --- Analyse-Views (bauen auf v_trips_monitoring auf) ---
+    cur.execute("""
+    CREATE VIEW v_anomaly_timeseries AS
+        SELECT
+            date(start_time) AS time,
+            COUNT(*) AS value,
+            'anomalies' AS series,
+            NULL AS trip_id,
+            NULL AS vin,
+            NULL AS vehicle_model,
+            NULL AS trip_category,
+            GROUP_CONCAT(DISTINCT anomaly_reason) AS anomaly_reason
+        FROM v_trips_monitoring
+        WHERE start_time IS NOT NULL
+          AND is_anomaly = 1
+        GROUP BY date(start_time)
+        ORDER BY time;""")
+
+    cur.execute("""
+    CREATE VIEW v_ghost_trips AS
+        SELECT * FROM v_trips_monitoring WHERE is_ghost_trip = 1 ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_hardware_comparison AS
+        SELECT
+            start_time AS time,
+            duration_seconds AS value,
+            COALESCE(hardware_group, 'unknown') AS series,
+            trip_id,
+            vin,
+            vehicle_model,
+            hardware_group,
+            trip_category,
+            anomaly_reason
+        FROM v_trips_monitoring
+        WHERE start_time IS NOT NULL
+          AND duration_seconds IS NOT NULL
+        ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_long_trips AS
+        SELECT * FROM v_trips_monitoring WHERE is_long_trip = 1 ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_negative_values AS
+        SELECT * FROM v_trips_monitoring WHERE is_negative_value = 1 ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_teleportation_events AS
+        SELECT * FROM v_trips_monitoring WHERE is_teleportation = 1 ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_timeout_trips AS
+        SELECT * FROM v_trips_monitoring WHERE is_timeout_trip = 1 ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_trip_distance_timeseries AS
+        SELECT
+            start_time AS time,
+            distance_km AS value,
+            trip_category AS series,
+            trip_id,
+            vin,
+            vehicle_model,
+            trip_category,
+            anomaly_reason
+        FROM v_trips_monitoring
+        WHERE start_time IS NOT NULL
+          AND distance_km IS NOT NULL
+        ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_trip_duration_timeseries AS
+        SELECT
+            start_time AS time,
+            duration_seconds AS value,
+            trip_category AS series,
+            trip_id,
+            vin,
+            vehicle_model,
+            trip_category,
+            anomaly_reason
+        FROM v_trips_monitoring
+        WHERE start_time IS NOT NULL
+          AND duration_seconds IS NOT NULL
+        ORDER BY start_time;""")
+
+    cur.execute("""
+    CREATE VIEW v_trips_last_31_days AS
+        SELECT * FROM v_trips_monitoring
+        WHERE start_time >= datetime('now', '-31 days')
+        ORDER BY start_time;""")
 
 
 # Hauptablauf
