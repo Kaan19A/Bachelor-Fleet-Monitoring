@@ -282,10 +282,7 @@ def get_json(url, token_manager, _already_refreshed=False):
 
 
 def get_all_from_endpoint(url, token_manager):
-    """Holt alle Items eines (ggf. paginierten) Endpoints.
-
-    Unterstuetzt: direkte Liste, {"items":[...]}, 'next'-Link, limit/offset.
-    """
+   
     first = get_json(url, token_manager)
 
     if isinstance(first, list):
